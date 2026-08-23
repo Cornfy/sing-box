@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"github.com/sagernet/sing-box"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
+	"github.com/sagernet/sing-box/experimental/libbox/subtool"
 	"github.com/sagernet/sing-box/option"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/json"
@@ -57,6 +59,16 @@ func readConfigAt(path string) (*OptionsEntry, error) {
 	if err != nil {
 		return nil, E.Cause(err, "read config at ", path)
 	}
+
+	if bytes.Contains(configContent, []byte("\"_extra\"")) {
+		log.Info("Detected template configuration, fetching subscriptions and compiling...")
+		compiledJson, err := subtool.ProcessTemplateString(string(configContent))
+		if err != nil {
+			return nil, E.Cause(err, "compile template at ", path)
+		}
+		configContent = []byte(compiledJson)
+	}
+
 	options, err := json.UnmarshalExtendedContext[option.Options](globalCtx, configContent)
 	if err != nil {
 		return nil, E.Cause(err, "decode config at ", path)
