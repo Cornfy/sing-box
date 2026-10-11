@@ -21,3 +21,6 @@
 CLAUDE.md
 AGENTS.md
 /.claude/
+
+# Repository-local build caches
+/.cache/
