@@ -21,3 +21,11 @@
 CLAUDE.md
 AGENTS.md
 /.claude/
+
+# 仓库内的构建缓存
+/.cache/
+
+# 本地运行生成的资源和状态目录
+/webui/
+/tailscale/
+/Taildrop/
