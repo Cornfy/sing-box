@@ -2,7 +2,6 @@ package subtool
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -63,7 +62,7 @@ func ProcessTemplateString(templateContent string) (string, error) {
 		return "", fmt.Errorf("未在 _extra 中指定任何有效的订阅源 (sub_urls)")
 	}
 
-	// 抓取并解析节点 (10秒熔断机制)
+	// 抓取并解析节点，订阅请求最多等待 30 秒。
 	nodes, err := fetchAndConvertProxies(fetchTasks, controlConfig)
 	if err != nil {
 		return "", err
@@ -83,7 +82,7 @@ func ProcessTemplateString(templateContent string) (string, error) {
 		return "", fmt.Errorf("生成最终 JSON 失败: %w", err)
 	}
 
-	return postProcessJson(outputBuffer.String()), nil
+	return outputBuffer.String(), nil
 }
 
 func fetchAndConvertProxies(
@@ -103,15 +102,15 @@ func fetchAndConvertProxies(
 		}
 	}
 
-	// 10 秒超时 HTTP Client
+	// 与独立 sub-tools 保持一致：订阅请求超时为 30 秒。
 	httpClient := &http.Client{
-		Timeout: 10 * time.Second,
+		Timeout: 30 * time.Second,
 	}
 
 	var fetchErrors []string
 
 	for _, task := range fetchTasks {
-		rawContent, err := downloadWithTimeout(httpClient, task.SubscriptionUrl)
+		rawContent, err := downloadRawSubscriptionContentWithTimeout(httpClient, task.SubscriptionUrl)
 		if err != nil {
 			fetchErrors = append(fetchErrors, fmt.Sprintf("[%s] 请求失败: %v", task.SubscriptionLabel, err))
 			continue
@@ -156,31 +155,35 @@ func fetchAndConvertProxies(
 	return finalNodes, nil
 }
 
-func downloadWithTimeout(client *http.Client, url string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return "", err
+// downloadRawSubscriptionContentWithTimeout 下载订阅正文，限制响应大小并避免错误提示泄露订阅令牌。
+func downloadRawSubscriptionContentWithTimeout(subscriptionHttpClient *http.Client, subscriptionUrl string) (string, error) {
+	subscriptionRequest, requestCreationError := http.NewRequest(http.MethodGet, subscriptionUrl, nil)
+	if requestCreationError != nil {
+		return "", fmt.Errorf("订阅地址格式无效")
 	}
-	req.Header.Set("User-Agent", "sing-box/sub-tool")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
+	// 与独立 sub-tools 使用相同的 User-Agent，避免订阅服务返回完整配置而非分享链接。
+	subscriptionRequest.Header.Set("User-Agent", "Go-http-client/1.1")
+	subscriptionResponse, requestError := subscriptionHttpClient.Do(subscriptionRequest)
+	if requestError != nil {
+		return "", fmt.Errorf("订阅请求失败（网络错误或超时）")
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("HTTP 状态码错误: %d", resp.StatusCode)
+	defer subscriptionResponse.Body.Close()
+	if subscriptionResponse.StatusCode < 200 || subscriptionResponse.StatusCode >= 300 {
+		return "", fmt.Errorf("订阅服务器返回 HTTP %d", subscriptionResponse.StatusCode)
 	}
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
+	const maximumSubscriptionResponseBodySizeInBytes = 16 << 20
+	responseBodyBytes, responseReadError := io.ReadAll(io.LimitReader(subscriptionResponse.Body, maximumSubscriptionResponseBodySizeInBytes+1))
+	if responseReadError != nil {
+		return "", fmt.Errorf("订阅正文读取失败")
 	}
-	return string(bodyBytes), nil
+	if len(responseBodyBytes) > maximumSubscriptionResponseBodySizeInBytes {
+		return "", fmt.Errorf("订阅正文超过 16 MiB 限制")
+	}
+	subscriptionContent := strings.TrimSpace(strings.TrimPrefix(string(responseBodyBytes), "\ufeff"))
+	if subscriptionContent == "" {
+		return "", fmt.Errorf("订阅正文为空")
+	}
+	return subscriptionContent, nil
 }
 
 func injectNodesAndGroups(
@@ -273,10 +276,4 @@ func injectNodesAndGroups(
 
 	templateMap.Delete("_extra")
 	return templateMap
-}
-
-func postProcessJson(jsonInput string) string {
-	replacer := strings.NewReplacer("\\u0026", "&", "\\u003c", "<", "\\u003e", ">")
-	arrayCompactRegex := regexp.MustCompile(`\[\s+([^\[\]\n]+)\s+\]`)
-	return arrayCompactRegex.ReplaceAllString(replacer.Replace(jsonInput), `[$1]`)
 }
